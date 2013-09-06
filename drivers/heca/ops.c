@@ -529,7 +529,7 @@ static int heca_retry_claim(struct heca_message *msg, struct page *page)
         if (!hproc)
                 goto fail;
 
-        mr = find_heca_mr(hproc, msg->req_addr);
+        mr = find_heca_mr(hproc, msg->mr_id);
         if (!mr)
                 goto fail;
 
