@@ -155,32 +155,42 @@ static int insert_heca_mr(struct heca_process *hproc,
 
         r = radix_tree_preload(GFP_HIGHUSER_MOVABLE & GFP_KERNEL);
         if (r)
-                goto fail;
+                goto exit;
 
         write_seqlock(&hproc->hmr_seq_lock);
-
-        /* insert to radix tree */
-        r = radix_tree_insert(&hproc->hmr_id_tree_root,
-                        (unsigned long) mr->hmr_id, mr);
-        if (r)
-                goto out;
 
         /* insert to rb tree */
         while (*new) {
                 this = rb_entry(*new, struct heca_memory_region, rb_node);
                 parent = *new;
                 if (mr->addr < this->addr)
-                        new = &((*new)->rb_left);
-                else if (mr->addr > this->addr)
+                        if(mr->addr + mr->sz < this->addr)
+                                new = &((*new)->rb_left);
+                        else{
+                                r = -EEXIST;
+                                goto out;
+                        }
+
+
+                else if (mr->addr > (this->addr + this->sz))
                         new = &((*new)->rb_right);
+                else{
+                        r = -EEXIST;
+                        goto out;
+                }
         }
 
         rb_link_node(&mr->rb_node, parent, new);
         rb_insert_color(&mr->rb_node, root);
+        /* insert to radix tree */
+        r = radix_tree_insert(&hproc->hmr_id_tree_root,
+                        (unsigned long) mr->hmr_id, mr);
+        if (r)
+                rb_erase(&mr->rb_node, root);
 out:
         radix_tree_preload_end();
         write_sequnlock(&hproc->hmr_seq_lock);
-fail:
+exit:
         return r;
 }
 
@@ -207,14 +217,6 @@ int create_heca_mr(struct hecaioc_hmr *udata)
                 goto out;
         }
 
-        /* FIXME: Validate against every kind of overlap! */
-        if (search_heca_mr_by_addr(local_hproc, (unsigned long) udata->addr)) {
-                heca_printk(KERN_ERR "mr already exists at addr 0x%lx",
-                                udata->addr);
-                ret = -EEXIST;
-                goto out;
-        }
-
         mr = kzalloc(sizeof(struct heca_memory_region), GFP_KERNEL);
         if (!mr) {
                 heca_printk(KERN_ERR "can't allocate memory for MR");
@@ -222,15 +224,17 @@ int create_heca_mr(struct hecaioc_hmr *udata)
                 goto out;
         }
 
+        if (udata->flags & UD_COPY_ON_ACCESS) {
+                mr->flags |= MR_COPY_ON_ACCESS;
+                if (udata->flags & UD_SHARED)
+                        goto out_free;
+        } else if (udata->flags & UD_SHARED) {
+                mr->flags |= MR_SHARED;
+        }
         mr->hmr_id = udata->hmr_id;
         mr->addr = (unsigned long) udata->addr;
         mr->sz = udata->sz;
 
-        mr->kobj.kset = local_hproc->hmrs_kset;
-        ret = kobject_init_and_add(&mr->kobj, &ktype_hmr, NULL,
-                        HMR_KOBJECT, mr->hmr_id);
-        if(ret)
-                goto kobj_err;
         if (insert_heca_mr(local_hproc, mr)){
                 heca_printk(KERN_ERR "insert MR failed  addr 0x%lx",
                                 udata->addr);
@@ -264,13 +268,6 @@ int create_heca_mr(struct hecaioc_hmr *udata)
                 hproc_put(owner);
         }
 
-        if (udata->flags & UD_COPY_ON_ACCESS) {
-                mr->flags |= MR_COPY_ON_ACCESS;
-                if (udata->flags & UD_SHARED)
-                        goto out_remove_tree;
-        } else if (udata->flags & UD_SHARED) {
-                mr->flags |= MR_SHARED;
-        }
 
         if (!(mr->flags & MR_LOCAL) && (udata->flags & UD_AUTO_UNMAP)) {
                 ret = unmap_range(hspace, mr->descriptor, local_hproc->pid,
@@ -278,6 +275,11 @@ int create_heca_mr(struct hecaioc_hmr *udata)
                 if(ret)
                         goto out_remove_tree;
         }
+        mr->kobj.kset = local_hproc->hmrs_kset;
+        ret = kobject_init_and_add(&mr->kobj, &ktype_hmr, NULL,
+                        HMR_KOBJECT, mr->hmr_id);
+        if(ret)
+                goto kobj_err;
         hproc_put(local_hproc);
         heca_printk(KERN_INFO "MR id [%d] addr [0x%lx] sz [0x%lx] --> ret %d",
                         udata->hmr_id, udata->addr, udata->sz, ret);
@@ -287,11 +289,12 @@ int create_heca_mr(struct hecaioc_hmr *udata)
 out_remove_tree:
         remove_hmr_from_hproc_trees(local_hproc, mr);
 out_free:
-        teardown_heca_memory_region(mr);
+        kfree(mr);
 out:
         hproc_put(local_hproc);
         return ret;
 kobj_err:
+        remove_hmr_from_hproc_trees(local_hproc, mr);
         kobject_put(&mr->kobj);
         hproc_put(local_hproc);
         return ret;
