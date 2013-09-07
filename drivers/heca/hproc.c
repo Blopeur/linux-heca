@@ -499,10 +499,13 @@ static void destroy_hproc_mrs(struct heca_process *hproc)
                         break;
                 }
                 mr = rb_entry(node, struct heca_memory_region, rb_node);
-                rb_erase(&mr->rb_node, root);
-                radix_tree_delete(&hproc->hmr_id_tree_root, mr->hmr_id);
-                write_sequnlock(&hproc->hmr_seq_lock);
-                teardown_heca_memory_region(mr);
+                mr = hmr_get_unless_zero(mr);
+                if(mr){
+                        write_sequnlock(&hproc->hmr_seq_lock);
+                        teardown_heca_memory_region(hproc, mr);
+                }
+                else
+                        write_sequnlock(&hproc->hmr_seq_lock);
         } while(1);
 
         kset_unregister(hproc->hmrs_kset);

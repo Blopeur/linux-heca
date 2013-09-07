@@ -11,16 +11,128 @@
 #include "hutils.h"
 #include "hproc.h"
 
+
 #include "ops.h"
 
-#define HMR_KOBJECT              "%u"
+#define HMR_KOBJECT             "%u"
 
-#define to_hmr(m)                container_of(m, struct heca_memory_region, kobj)
-#define to_hmr_attr(ma)          container_of(ma, struct hmr_attr, attr)
+#define to_hmr(m)               container_of(m, struct heca_memory_region, kobj)
+#define to_hmr_attr(ma)         container_of(ma, struct hmr_attr, attr)
+#define to_hmr_from_kref(m)     container_of(m,struct heca_memory_region, kref)
+#define to_hmr_from_rcu(m)      container_of(m,struct heca_memory_region, rcu)
 
 
 /*
- * Heca proc  Kobject
+ * we need to hold the seq write
+ * or read  (but we might need to lookp and protect with RCU in that case)
+ *  lock of hproc when calling the function
+ */
+static inline struct heca_memory_region *find_hmr_by_addr(
+                struct rb_root *root, unsigned long addr)
+{
+        struct rb_node *node;
+        struct heca_memory_region *this;
+        for (node = root->rb_node; node; this = NULL) {
+                this = rb_entry(node, struct heca_memory_region,
+                                rb_node);
+
+                if (addr < this->addr)
+                        node = node->rb_left;
+                else if (addr > this->addr)
+                        if (addr < (this->addr + this->sz))
+                                break;
+                        else
+                                node = node->rb_right;
+                else
+                        break;
+        }
+        return this;
+}
+
+
+/*
+ * Release function
+ */
+
+static void free_hmr_rcu(struct rcu_head *rcu){
+        struct heca_memory_region *hmr = to_hmr_from_rcu(rcu);
+        heca_printk(KERN_INFO "Releasing MR : %p ,  mr_id: %u", hmr,
+                        hmr->hmr_id);
+        kfree(hmr);
+}
+
+/*
+ * return HMR if success or NULL if the hmr has already been removed
+ */
+static inline struct heca_memory_region *remove_hmr_from_hproc_trees(
+                struct heca_process *hproc,
+                struct heca_memory_region *hmr)
+{
+        write_seqlock(&hproc->hmr_seq_lock);
+        hmr = find_hmr_by_addr(&hproc->hmr_tree_root, hmr->addr);
+        if(hmr){
+                rb_erase(&hmr->rb_node, &hproc->hmr_tree_root);
+                radix_tree_delete(&hproc->hmr_id_tree_root,
+                                hmr->hmr_id);
+        }
+        write_sequnlock(&hproc->hmr_seq_lock);
+        return hmr;
+}
+
+static inline void hmr_release(struct kref *kref)
+{
+        struct heca_memory_region *hmr = to_hmr_from_kref(kref);
+        /*
+         * the final kfree is always triggered within the kobject via RCU call
+         */
+        kobject_del(&hmr->kobj);
+        kobject_put(&hmr->kobj);
+}
+/*
+ * Note: this function does a double put, so a get is needed before calling it!
+ * return 0 if we succefully removed hmr from the hproc search datastructure
+ */
+void teardown_heca_memory_region(struct heca_process *hproc,
+                struct heca_memory_region *hmr)
+{
+        if(remove_hmr_from_hproc_trees(hproc, hmr))
+                hmr_put(hmr);
+        /*
+         * We check if a previous teardown call was already triggered
+         * if we have a success full removal
+         *
+         */
+        hmr_put(hmr);
+
+}
+
+/*
+ * HMR refcount
+ */
+
+struct heca_memory_region * __must_check hmr_get_unless_zero(
+                struct heca_memory_region *hmr)
+{
+        if(hmr && kref_get_unless_zero(&hmr->kref))
+                return hmr;
+        return NULL;
+}
+
+void hmr_get(struct heca_memory_region *hmr)
+{
+        if(hmr)
+                kref_get(&hmr->kref);
+}
+
+int hmr_put(struct heca_memory_region *hmr)
+{
+        if (hmr)
+                return kref_put(&hmr->kref, hmr_release);
+        return 0;
+}
+
+/*
+ * Heca MR  Kobject
  */
 
 struct hmr_attr {
@@ -33,10 +145,7 @@ static void kobj_hmr_release(struct kobject *k)
 {
         struct heca_memory_region *hmr = to_hmr(k);
 
-        heca_printk(KERN_INFO "Releasing MR : %p ,  mr_id: %u", hmr,
-                        hmr->hmr_id);
-        synchronize_rcu();
-        kfree(hmr);
+        call_rcu(&hmr->rcu, free_hmr_rcu);
 }
 
 static ssize_t hmr_show(struct kobject *k, struct attribute *a,
@@ -63,22 +172,9 @@ static struct kobj_type ktype_hmr = {
         .default_attrs = (struct attribute **) hmr_attr,
 };
 
-void teardown_heca_memory_region(struct heca_memory_region *hmr)
-{
-        kobject_del(&hmr->kobj);
-        kobject_put(&hmr->kobj);
-
-}
-
-static void remove_hmr_from_hproc_trees(struct heca_process *hproc,
-                struct heca_memory_region *hmr)
-{
-        write_seqlock(&hproc->hmr_seq_lock);
-        rb_erase(&hmr->rb_node, &hproc->hmr_tree_root);
-        radix_tree_delete(&hproc->hmr_id_tree_root, hmr->hmr_id);
-        write_sequnlock(&hproc->hmr_seq_lock);
-}
-
+/* FIXME : the twio function below need to be made thread safe ( grab the ref
+ * count_
+ */
 
 struct heca_memory_region *find_heca_mr(struct heca_process *hproc,
                 u32 id)
@@ -235,6 +331,11 @@ int create_heca_mr(struct hecaioc_hmr *udata)
         mr->addr = (unsigned long) udata->addr;
         mr->sz = udata->sz;
 
+        kref_init(&mr->kref);
+        /*
+         * FIXME: possible race condition when a teardownis triggered and we are
+         * still insertign the MR
+         */
         if (insert_heca_mr(local_hproc, mr)){
                 heca_printk(KERN_ERR "insert MR failed  addr 0x%lx",
                                 udata->addr);
@@ -285,17 +386,22 @@ int create_heca_mr(struct hecaioc_hmr *udata)
                         udata->hmr_id, udata->addr, udata->sz, ret);
         return ret;
 
-
+        /*
+         * FIXME: This id not 100% safe , if we start having a teardown while we didn't
+         * fully register the MR we run into a race condition..
+         */
 out_remove_tree:
-        remove_hmr_from_hproc_trees(local_hproc, mr);
+        mr = remove_hmr_from_hproc_trees(local_hproc, mr);
 out_free:
-        kfree(mr);
+        if(mr)
+                call_rcu(&mr->rcu, free_hmr_rcu);
 out:
         hproc_put(local_hproc);
         return ret;
 kobj_err:
-        remove_hmr_from_hproc_trees(local_hproc, mr);
-        kobject_put(&mr->kobj);
+        mr = remove_hmr_from_hproc_trees(local_hproc, mr);
+        if(mr)
+                kobject_put(&mr->kobj);
         hproc_put(local_hproc);
         return ret;
 }
