@@ -164,7 +164,7 @@ static int insert_heca_mr(struct heca_process *hproc,
                 this = rb_entry(*new, struct heca_memory_region, rb_node);
                 parent = *new;
                 if (mr->addr < this->addr)
-                        if(mr->addr + mr->sz < this->addr)
+                        if(mr->addr + mr->sz <= this->addr)
                                 new = &((*new)->rb_left);
                         else{
                                 r = -EEXIST;
@@ -172,7 +172,7 @@ static int insert_heca_mr(struct heca_process *hproc,
                         }
 
 
-                else if (mr->addr > (this->addr + this->sz))
+                else if (mr->addr >= (this->addr + this->sz))
                         new = &((*new)->rb_right);
                 else{
                         r = -EEXIST;
