@@ -54,6 +54,12 @@ static int ioctl_mr(int ioctl, void __user *argp)
                 return -EFAULT;
         }
 
+        /*FIXME add more check*/
+        if(udata.hmr_id ==0)
+                return -EINVAL;
+        if(udata.sz == 0)
+                return -EINVAL;
+
         switch (ioctl) {
         case HECAIOC_HMR_ADD:
                 return create_heca_mr(&udata);
