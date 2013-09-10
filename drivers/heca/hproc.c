@@ -153,212 +153,6 @@ inline struct heca_process *find_local_hproc_from_mm(struct mm_struct *mm)
                 NULL;
 }
 
-static int insert_hproc_to_radix_trees(struct heca_module_state *heca_state,
-                struct heca_space *hspace, struct heca_process *new_hproc)
-{
-        int r;
-
-preload:
-        r = radix_tree_preload(GFP_HIGHUSER_MOVABLE & GFP_KERNEL);
-        if (r) {
-                if (r == -ENOMEM) {
-                        heca_printk(KERN_ERR "radix_tree_preload: ENOMEM retrying ...");
-                        mdelay(2);
-                        goto preload;
-                }
-                heca_printk(KERN_ERR "radix_tree_preload: failed %d", r);
-                goto out;
-        }
-
-
-        spin_lock(&heca_state->radix_lock);
-        r = radix_tree_insert(&hspace->hprocs_tree_root,
-                        (unsigned long) new_hproc->hproc_id, new_hproc);
-        if (r)
-                goto unlock;
-
-        if (is_hproc_local(new_hproc)) {
-                r = radix_tree_insert(&hspace->hprocs_mm_tree_root,
-                                (unsigned long) new_hproc->mm, new_hproc);
-                if (r)
-                        goto unlock;
-
-                r = radix_tree_insert(&heca_state->mm_tree_root,
-                                (unsigned long) new_hproc->mm, new_hproc);
-        }
-
-unlock:
-        spin_unlock(&heca_state->radix_lock);
-
-        radix_tree_preload_end();
-        if (r) {
-                heca_printk(KERN_ERR "failed radix_tree_insert %d", r);
-                radix_tree_delete(&hspace->hprocs_tree_root,
-                                (unsigned long) new_hproc->hproc_id);
-                if (is_hproc_local(new_hproc)) {
-                        radix_tree_delete(&hspace->hprocs_mm_tree_root,
-                                        (unsigned long) new_hproc->mm);
-                        radix_tree_delete(&heca_state->mm_tree_root,
-                                        (unsigned long) new_hproc->mm);
-                }
-        }
-
-out:
-        return r;
-}
-
-int create_hproc(struct hecaioc_hproc *hproc_info)
-{
-        struct heca_module_state *heca_state = get_heca_module_state();
-        int r = 0;
-        struct heca_space *hspace;
-        struct heca_process *found_hproc, *new_hproc = NULL;
-
-        /* allocate a new hproc */
-        new_hproc = kzalloc(sizeof(*new_hproc), GFP_KERNEL);
-        if (!new_hproc) {
-                heca_printk(KERN_ERR "failed kzalloc");
-                return -ENOMEM;
-        }
-
-        /* grab hspace lock */
-        mutex_lock(&heca_state->heca_state_mutex);
-        hspace = find_hspace(hproc_info->hspace_id);
-        if (hspace)
-                mutex_lock(&hspace->hspace_mutex);
-        mutex_unlock(&heca_state->heca_state_mutex);
-        if (!hspace) {
-                heca_printk(KERN_ERR "could not find hspace: %d",
-                                hproc_info->hspace_id);
-                r = -EFAULT;
-                goto no_hspace;
-        }
-
-        /* already exists? */
-        found_hproc = find_hproc(hspace, hproc_info->hproc_id);
-        if (found_hproc) {
-                heca_printk(KERN_ERR "hproc %d (hspace %d) already exists",
-                                hproc_info->hproc_id, hproc_info->hspace_id);
-                r = -EEXIST;
-                goto hproc_exist;
-        }
-
-        /* initial hproc data */
-        new_hproc->hproc_id = hproc_info->hproc_id;
-        new_hproc->is_local = hproc_info->is_local;
-        new_hproc->pid = hproc_info->pid;
-        new_hproc->hspace = hspace;
-
-        /* register local hproc */
-        if (hproc_info->is_local) {
-                struct mm_struct *mm;
-
-                mm = find_mm_by_pid(new_hproc->pid);
-                if (!mm) {
-                        heca_printk(KERN_ERR "can't find pid %d",
-                                        new_hproc->pid);
-                        r = -ESRCH;
-                        goto no_mm;
-                }
-
-                found_hproc = find_local_hproc_from_mm(mm);
-                if (found_hproc) {
-                        heca_printk(KERN_ERR "Hproc already exists for current process");
-                        r = -EEXIST;
-                        goto hproc_exist;
-                }
-
-                new_hproc->mm = mm;
-                new_hproc->hmr_tree_root = RB_ROOT;
-                seqlock_init(&new_hproc->hmr_seq_lock);
-                new_hproc->hmr_cache = NULL;
-
-                init_llist_head(&new_hproc->delayed_gup);
-                INIT_DELAYED_WORK(&new_hproc->delayed_gup_work,
-                                delayed_gup_work_fn);
-                init_llist_head(&new_hproc->deferred_gups);
-                INIT_WORK(&new_hproc->deferred_gup_work, deferred_gup_work_fn);
-
-                spin_lock_init(&new_hproc->page_cache_spinlock);
-                spin_lock_init(&new_hproc->page_readers_spinlock);
-                spin_lock_init(&new_hproc->page_maintainers_spinlock);
-                INIT_RADIX_TREE(&new_hproc->page_cache, GFP_ATOMIC);
-                INIT_RADIX_TREE(&new_hproc->page_readers, GFP_ATOMIC);
-                INIT_RADIX_TREE(&new_hproc->page_maintainers, GFP_ATOMIC);
-                new_hproc->push_cache = RB_ROOT;
-                seqlock_init(&new_hproc->push_cache_lock);
-        }
-
-        new_hproc->kobj.kset = hspace->hprocs_kset;
-        r = kobject_init_and_add(&new_hproc->kobj, &ktype_hproc, NULL,
-                        HPROC_KOBJECT, new_hproc->hproc_id);
-        if(r){
-                goto kobj_err;
-        }
-        new_hproc->hmrs_kset = kset_create_and_add(HMRS_KSET, NULL,
-                        &new_hproc->kobj);
-        if(!new_hproc->hmrs_kset)
-                goto kset_fail;
-        /* register hproc by id and mm_struct (must come before hspace_get_descriptor) */
-        r = insert_hproc_to_radix_trees(heca_state, hspace, new_hproc);
-        if (r)
-                goto radix_fail;
-        list_add(&new_hproc->hproc_ptr, &hspace->hprocs_list);
-
-        /* assign descriptor for remote hproc */
-        if (!is_hproc_local(new_hproc)) {
-                u32 hproc_ids[] = {new_hproc->hproc_id, 0};
-                new_hproc->descriptor = heca_get_descriptor(hspace->hspace_id,
-                                hproc_ids);
-        }
-
-
-        mutex_unlock(&hspace->hspace_mutex);
-
-        if (!hproc_info->is_local) {
-                r = connect_hproc(hproc_info->hspace_id, hproc_info->hproc_id,
-                                hproc_info->remote.sin_addr.s_addr,
-                                hproc_info->remote.sin_port);
-
-                if (r) {
-                        heca_printk(KERN_ERR "connect_hproc failed %d", r);
-                        goto del_kobject;
-                }
-        }
-        heca_printk(KERN_INFO "hproc %p, res %d, hspace_id %u, hproc_id: %u --> ret %d",
-                        new_hproc, r, hproc_info->hspace_id,
-                        hproc_info->hproc_id, r);
-        return r;
-
-
-hproc_exist:
-        mutex_unlock(&hspace->hspace_mutex);
-        hproc_put(found_hproc);
-        kfree(new_hproc);
-        new_hproc = NULL;
-        return r;
-no_mm:
-        mutex_unlock(&hspace->hspace_mutex);
-        kfree(new_hproc);
-        new_hproc = NULL;
-        return r;
-radix_fail:
-kset_fail:
-        kobject_del(&new_hproc->kobj);
-kobj_err:
-        mutex_unlock(&hspace->hspace_mutex);
-        kobject_put(&new_hproc->kobj);
-        return r;
-del_kobject:
-        mutex_unlock(&hspace->hspace_mutex);
-        teardown_hproc(new_hproc);
-no_hspace :
-        return r;
-
-
-
-}
-
 /*
  * We dec page's refcount for every missing remote response (it would have
  * happened in hspace_ppe_clear_release after sending an answer to remote hproc)
@@ -511,22 +305,67 @@ static void destroy_hproc_mrs(struct heca_process *hproc)
         kset_unregister(hproc->hmrs_kset);
 }
 
-static void remove_hproc(struct heca_process *hproc){
-
+static inline void release_local_hproc(struct heca_process *hproc)
+{
         struct heca_module_state *heca_state = get_heca_module_state();
-        struct heca_space *hspace;
+        struct rb_root *root;
+        struct rb_node *node;
+       /*FIXME : do we need to protect the scan ?*/
+        if (heca_state->htm) {
+                root = &heca_state->htm->connections_rb_tree_root;
+                for (node = rb_first(root);
+                                node; node = rb_next(node)) {
+                        struct heca_connection *conn;
 
-
-        mutex_lock(&heca_state->heca_state_mutex);
-        hspace = hproc->hspace;
-        mutex_lock(&hspace->hspace_mutex);
-        if (is_hproc_local(hproc)) {
-                radix_tree_delete(&heca_state->mm_tree_root,
-                                (unsigned long) hproc->mm);
+                        conn = rb_entry(node,
+                                        struct heca_connection,
+                                        rb_node);
+                        BUG_ON(!conn);
+                        release_hproc_queued_requests(hproc,
+                                        &conn->tx_buffer);
+                        release_hproc_tx_elements(hproc, conn);
+                }
         }
-        mutex_unlock(&heca_state->heca_state_mutex);
-        /*FIXME: checkif we need to protect the list del*/
-        list_del(&hproc->hproc_ptr);
+        release_hproc_push_elements(hproc);
+        destroy_hproc_mrs(hproc);
+}
+
+static inline void release_connection_remote_hproc(struct heca_space *hspace,
+                struct heca_process *hproc)
+{
+        if (hproc->connection) {
+                struct heca_process *local_hproc;
+
+                release_hproc_queued_requests(hproc,
+                                &hproc->connection->tx_buffer);
+                release_hproc_tx_elements(hproc, hproc->connection);
+
+                /* potentially very expensive way to do this */
+                list_for_each_entry (local_hproc, &hspace->hprocs_list,
+                                hproc_ptr) {
+                        if (is_hproc_local(local_hproc))
+                                surrogate_push_remote_hproc(local_hproc, hproc);
+                }
+
+        }
+}
+
+
+/* this function is also call with the hspace mutex held */
+static inline int hproc_exist(struct heca_space *hspace, u32 id)
+{
+        struct heca_process *local_hproc;
+        list_for_each_entry (local_hproc, &hspace->hprocs_list, hproc_ptr) {
+                if (local_hproc->hproc_id == id)
+                        return 0;
+        }
+        return 1;
+}
+
+/* the hspace_mutex needs to be take to execute this function */
+static inline void deregister_hproc(struct heca_module_state *heca_state,
+                struct heca_space *hspace, struct heca_process *hproc)
+{
         radix_tree_delete(&hspace->hprocs_tree_root,
                         (unsigned long) hproc->hproc_id);
         if (is_hproc_local(hproc)) {
@@ -535,10 +374,206 @@ static void remove_hproc(struct heca_process *hproc){
                 dequeue_and_gup_cleanup(hproc);
                 radix_tree_delete(&hspace->hprocs_mm_tree_root,
                                 (unsigned long) hproc->mm);
+                mutex_lock(&heca_state->heca_state_mutex);
+                radix_tree_delete(&heca_state->mm_tree_root,
+                                (unsigned long) hproc->mm);
+                mutex_unlock(&heca_state->heca_state_mutex);
         }
 
         remove_hproc_from_descriptors(hproc);
+        list_del(&hproc->hproc_ptr);
+}
 
+static inline int register_hproc(struct heca_module_state *heca_state,
+                struct heca_space *hspace, struct heca_process *new_hproc)
+{
+        int r;
+
+preload:
+        r = radix_tree_preload(GFP_HIGHUSER_MOVABLE & GFP_KERNEL);
+        if (r) {
+                if (r == -ENOMEM) {
+                        heca_printk(KERN_ERR "radix_tree_preload: ENOMEM retrying ...");
+                        mdelay(2);
+                        goto preload;
+                }
+                heca_printk(KERN_ERR "radix_tree_preload: failed %d", r);
+                goto out;
+        }
+
+
+        r = radix_tree_insert(&hspace->hprocs_tree_root,
+                        (unsigned long) new_hproc->hproc_id, new_hproc);
+        if (r)
+                goto preload_out;
+
+        if (is_hproc_local(new_hproc)) {
+                r = radix_tree_insert(&hspace->hprocs_mm_tree_root,
+                                (unsigned long) new_hproc->mm, new_hproc);
+                if(r)
+                        goto hspace_mm_fail;
+                mutex_lock(&heca_state->heca_state_mutex);
+                r = radix_tree_insert(&heca_state->mm_tree_root,
+                                (unsigned long) new_hproc->mm, new_hproc);
+                mutex_unlock(&heca_state->heca_state_mutex);
+                if(r)
+                        goto hstate_mm_fail;
+        }
+
+        list_add(&new_hproc->hproc_ptr, &hspace->hprocs_list);
+        radix_tree_preload_end();
+        return r;
+
+hstate_mm_fail:
+
+        radix_tree_delete(&hspace->hprocs_mm_tree_root,
+                        (unsigned long) new_hproc->mm);
+hspace_mm_fail:
+
+        radix_tree_delete(&hspace->hprocs_tree_root,
+                        (unsigned long) new_hproc->hproc_id);
+preload_out:
+        radix_tree_preload_end();
+out:
+        return r;
+}
+
+int create_hproc(struct hecaioc_hproc *hproc_info)
+{
+        struct heca_module_state *heca_state = get_heca_module_state();
+        int r = 0;
+        struct heca_space *hspace;
+        struct heca_process *new_hproc = NULL;
+
+        /* allocate a new hproc */
+        new_hproc = kzalloc(sizeof(*new_hproc), GFP_KERNEL);
+        if (!new_hproc) {
+                heca_printk(KERN_ERR "failed kzalloc");
+                return -ENOMEM;
+        }
+
+        mutex_lock(&hspace->hspace_mutex);
+
+        /* already exists? */
+        if(!hproc_exist(hspace, hproc_info->hproc_id)){
+                r = -EEXIST;
+                goto hproc_exist;
+        }
+
+        /* initial hproc data */
+        new_hproc->hproc_id = hproc_info->hproc_id;
+        new_hproc->is_local = hproc_info->is_local;
+        new_hproc->pid = hproc_info->pid;
+        new_hproc->hspace = hspace;
+        /* assign descriptor for remote hproc */
+        if (!is_hproc_local(new_hproc)) {
+                u32 hproc_ids[] = {new_hproc->hproc_id, 0};
+                r = connect_hproc(hproc_info->hspace_id, hproc_info->hproc_id,
+                                hproc_info->remote.sin_addr.s_addr,
+                                hproc_info->remote.sin_port);
+                if (r) {
+                        goto connect_fail;
+                }
+                new_hproc->descriptor = heca_get_descriptor(hspace->hspace_id,
+                                hproc_ids);
+        } else {
+
+                struct mm_struct *mm;
+
+                mm = find_mm_by_pid(new_hproc->pid);
+                if (!mm) {
+                        heca_printk(KERN_ERR "can't find pid %d",
+                                        new_hproc->pid);
+                        r = -ESRCH;
+                        goto no_mm;
+                }
+                new_hproc->mm = mm;
+                new_hproc->hmr_tree_root = RB_ROOT;
+                seqlock_init(&new_hproc->hmr_seq_lock);
+                new_hproc->hmr_cache = NULL;
+
+                init_llist_head(&new_hproc->delayed_gup);
+                INIT_DELAYED_WORK(&new_hproc->delayed_gup_work,
+                                delayed_gup_work_fn);
+                init_llist_head(&new_hproc->deferred_gups);
+                INIT_WORK(&new_hproc->deferred_gup_work, deferred_gup_work_fn);
+
+                spin_lock_init(&new_hproc->page_cache_spinlock);
+                spin_lock_init(&new_hproc->page_readers_spinlock);
+                spin_lock_init(&new_hproc->page_maintainers_spinlock);
+                INIT_RADIX_TREE(&new_hproc->page_cache, GFP_ATOMIC);
+                INIT_RADIX_TREE(&new_hproc->page_readers, GFP_ATOMIC);
+                INIT_RADIX_TREE(&new_hproc->page_maintainers, GFP_ATOMIC);
+                new_hproc->push_cache = RB_ROOT;
+                seqlock_init(&new_hproc->push_cache_lock);
+        }
+
+        /* register hproc by id and mm_struct (must come before hspace_get_descriptor) */
+        r = register_hproc(heca_state, hspace, new_hproc);
+        if (r)
+                goto reg_fail;
+
+        /* SYFS stuff*/
+        new_hproc->kobj.kset = hspace->hprocs_kset;
+        r = kobject_init_and_add(&new_hproc->kobj, &ktype_hproc, NULL,
+                        HPROC_KOBJECT, new_hproc->hproc_id);
+        if(r){
+                goto kobj_err;
+        }
+        new_hproc->hmrs_kset = kset_create_and_add(HMRS_KSET, NULL,
+                        &new_hproc->kobj);
+        if(!new_hproc->hmrs_kset)
+                goto kset_fail;
+        mutex_unlock(&hspace->hspace_mutex);
+
+        heca_printk(KERN_INFO "hproc %p, res %d, hspace_id %u, hproc_id: %u --> ret %d",
+                        new_hproc, r, hproc_info->hspace_id,
+                        hproc_info->hproc_id, r);
+        return r;
+
+hproc_exist:
+connect_fail:
+no_mm:
+        mutex_unlock(&hspace->hspace_mutex);
+        kfree(new_hproc);
+        new_hproc = NULL;
+        return r;
+reg_fail:
+        mutex_unlock(&hspace->hspace_mutex);
+        if(!is_hproc_local(new_hproc)){
+                release_connection_remote_hproc(hspace, new_hproc);
+                remove_hproc_from_descriptors(new_hproc);
+        }
+
+        kfree(new_hproc);
+        new_hproc = NULL;
+        return r;
+
+kset_fail:
+        kobject_del(&new_hproc->kobj);
+kobj_err:
+        deregister_hproc(heca_state, hspace, new_hproc);
+        mutex_unlock(&hspace->hspace_mutex);
+        if(!is_hproc_local(new_hproc))
+        {
+                release_connection_remote_hproc(hspace, new_hproc);
+                remove_hproc_from_descriptors(new_hproc);
+        }
+        kobject_put(&new_hproc->kobj);
+        return r;
+}
+
+
+static int remove_hproc(struct heca_space *hspace, struct heca_process *hproc)
+{
+
+        struct heca_module_state *heca_state = get_heca_module_state();
+        mutex_lock(&hspace->hspace_mutex);
+        if(hproc_exist(hspace, hproc->hproc_id)){
+                mutex_unlock(&hspace->hspace_mutex);
+                return -1;
+        }
+        deregister_hproc(heca_state, hspace, hproc);
         /*
          * we removed the hproc from all descriptors and trees, so we won't make any
          * new operations concerning it. now we only have to make sure to cancel
@@ -560,44 +595,15 @@ static void remove_hproc(struct heca_process *hproc){
          * which it isn't!
          * FIXME: the same problem is valid for push operations!
          */
-        if (is_hproc_local(hproc)) {
-                struct rb_root *root;
-                struct rb_node *node;
+        if (is_hproc_local(hproc))
+                release_local_hproc(hproc);
+        else
+                release_connection_remote_hproc(hspace, hproc);
 
-                if (heca_state->htm) {
-                        root = &heca_state->htm->connections_rb_tree_root;
-                        for (node = rb_first(root);
-                                        node; node = rb_next(node)) {
-                                struct heca_connection *conn;
-
-                                conn = rb_entry(node,
-                                                struct heca_connection,
-                                                rb_node);
-                                BUG_ON(!conn);
-                                release_hproc_queued_requests(hproc,
-                                                &conn->tx_buffer);
-                                release_hproc_tx_elements(hproc, conn);
-                        }
-                }
-                release_hproc_push_elements(hproc);
-                destroy_hproc_mrs(hproc);
-        } else if (hproc->connection) {
-                struct heca_process *local_hproc;
-
-                release_hproc_queued_requests(hproc,
-                                &hproc->connection->tx_buffer);
-                release_hproc_tx_elements(hproc, hproc->connection);
-
-                /* potentially very expensive way to do this */
-                list_for_each_entry (local_hproc, &hproc->hspace->hprocs_list,
-                                hproc_ptr) {
-                        if (is_hproc_local(local_hproc))
-                                surrogate_push_remote_hproc(local_hproc, hproc);
-                }
-        }
-
-
+        /* we remove the kobject entry */
         mutex_unlock(&hspace->hspace_mutex);
+        kobject_del(&hproc->kobj);
+        return 0;
 }
 
 
@@ -617,9 +623,8 @@ struct heca_process *find_any_hproc(struct heca_space *hspace,
 }
 
 
-
-struct heca_process *find_local_hproc_from_list(
-                struct heca_space *hspace)
+/* FIXME:this return the first local hproc , not all of them ...*/
+struct heca_process *find_local_hproc_from_list(struct heca_space *hspace)
 {
         struct heca_process *tmp_hproc;
 
@@ -635,14 +640,10 @@ struct heca_process *find_local_hproc_from_list(
  * Teardown operation
  */
 
-void  teardown_hproc(struct heca_process *hproc){
-
-        heca_printk(KERN_INFO "Tearing Down hproc %p, hproc_id: %u hspace_id: %u ",
-                        hproc, hproc->hproc_id, hproc->hspace->hspace_id );
-        /* we remove the kobject entry */
-        kobject_del(&hproc->kobj);
+void  teardown_hproc(struct heca_space *hspace, struct heca_process *hproc){
         /* cleanup the hproc */
-        remove_hproc(hproc);
+        if(!remove_hproc(hspace, hproc))
+                kobject_put(&hproc->kobj);
         /* final put for releasing the object*/
         kobject_put(&hproc->kobj);
 
@@ -650,23 +651,16 @@ void  teardown_hproc(struct heca_process *hproc){
 
 void teardown_hproc_by_id(u32 hspace_id, u32 hproc_id)
 {
-        struct heca_module_state *heca_state = get_heca_module_state();
         struct heca_space *hspace;
         struct heca_process *hproc = NULL;
 
-        mutex_lock(&heca_state->heca_state_mutex);
         hspace = find_hspace(hspace_id);
         if (!hspace) {
-                mutex_unlock(&heca_state->heca_state_mutex);
                 return;
         }
-
-        mutex_lock(&hspace->hspace_mutex);
         hproc = find_hproc(hspace, hproc_id);
-        mutex_unlock(&hspace->hspace_mutex);
-        mutex_unlock(&heca_state->heca_state_mutex);
         if (hproc) {
-                teardown_hproc(hproc);
+                teardown_hproc(hspace, hproc);
         }
 
 

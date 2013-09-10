@@ -30,7 +30,7 @@ static void teardown_hprocs(struct heca_space *hspace)
 
         list_for_each_safe (pos, n, &hspace->hprocs_list) {
                 hproc = list_entry(pos, struct heca_process, hproc_ptr);
-                teardown_hproc(hproc);
+                teardown_hproc(hspace, hproc);
         }
 
         kset_unregister(hspace->hprocs_kset);

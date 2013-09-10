@@ -1759,7 +1759,7 @@ static void remove_hprocs_for_conn(struct heca_connection *conn)
                 list_for_each_entry_safe (hproc, tmp_hproc,
                                 &hspace->hprocs_list, hproc_ptr) {
                         if (hproc->connection == conn)
-                                teardown_hproc(hproc);
+                                teardown_hproc(hspace, hproc);
                         else
                                 local_left += is_hproc_local(hproc);
                 }

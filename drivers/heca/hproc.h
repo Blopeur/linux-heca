@@ -73,7 +73,7 @@ inline struct heca_process *find_local_hproc_in_hspace(struct heca_space *,
 inline struct heca_process *find_local_hproc_from_mm(struct mm_struct *);
 int create_hproc(struct hecaioc_hproc *);
 void teardown_hproc_by_id(u32, u32);
-void teardown_hproc(struct heca_process *);
+void teardown_hproc(struct heca_space *, struct heca_process *);
 struct heca_process *find_any_hproc(struct heca_space *,
                 struct heca_process_list);
 struct heca_process *find_local_hproc_from_list(struct heca_space *);

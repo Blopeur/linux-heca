@@ -99,7 +99,7 @@ int heca_detach_task(struct task_struct *tsk)
                         rcu_read_lock();
                         if (tsk == find_task_by_vpid(hproc->pid)) {
                                 rcu_read_unlock();
-                                teardown_hproc(hproc);
+                                teardown_hproc(hspace, hproc);
                         } else {
                                 rcu_read_unlock();
                                 local_left += is_hproc_local(hproc);
