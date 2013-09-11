@@ -18,7 +18,22 @@
 #define HPROCS_KSET             "hprocs"
 
 #define to_hspace(s)            container_of(s, struct heca_space, kobj)
+#define to_hspace_from_rcu(m)    container_of(m,struct heca_space, rcu)
 #define to_hspace_attr(sa)      container_of(sa, struct hspace_attr, attr)
+
+
+/*
+ * Release function
+ */
+
+static void free_hspace_rcu(struct rcu_head *rcu){
+        struct heca_space *hspace = to_hspace_from_rcu(rcu);
+        heca_printk(KERN_INFO "Releasing hspace : %p ,  hspace_id: %u", hspace,
+                        hspace->hspace_id);
+        kfree(hspace);
+}
+
+
 /*
  * Creator / destructor
  */
@@ -76,12 +91,8 @@ static void kobj_hspace_release(struct kobject *k)
         radix_tree_delete(&heca_state->hspaces_tree_root,
                         (unsigned long) hspace->hspace_id);
         mutex_unlock(&heca_state->heca_state_mutex);
-        synchronize_rcu();
 
-        mutex_lock(&heca_state->heca_state_mutex);
-        kfree(hspace);
-        mutex_unlock(&heca_state->heca_state_mutex);
-
+        call_rcu(&hspace->rcu, free_hspace_rcu);
 }
 
 static ssize_t heca_space_show(struct kobject *k, struct attribute *a,
