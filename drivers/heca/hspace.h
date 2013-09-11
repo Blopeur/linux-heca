@@ -15,6 +15,7 @@
 struct heca_space {
         u32 hspace_id;
 
+        spinlock_t radix_lock;
         struct radix_tree_root hprocs_tree_root;
         struct radix_tree_root hprocs_mm_tree_root;
 

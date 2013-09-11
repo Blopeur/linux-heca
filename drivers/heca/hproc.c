@@ -339,7 +339,7 @@ static inline void release_connection_remote_hproc(struct heca_space *hspace,
                 release_hproc_queued_requests(hproc,
                                 &hproc->connection->tx_buffer);
                 release_hproc_tx_elements(hproc, hproc->connection);
-
+                /* FIXME: is it safe ??? pointer deref? */
                 /* potentially very expensive way to do this */
                 list_for_each_entry (local_hproc, &hspace->hprocs_list,
                                 hproc_ptr) {
@@ -366,18 +366,24 @@ static inline int hproc_exist(struct heca_space *hspace, u32 id)
 static inline void deregister_hproc(struct heca_module_state *heca_state,
                 struct heca_space *hspace, struct heca_process *hproc)
 {
+        spin_lock(&hspace->radix_lock);
         radix_tree_delete(&hspace->hprocs_tree_root,
                         (unsigned long) hproc->hproc_id);
+        spin_unlock(&hspace->radix_lock);
         if (is_hproc_local(hproc)) {
                 cancel_delayed_work_sync(&hproc->delayed_gup_work);
                 // to make sure everything is clean
                 dequeue_and_gup_cleanup(hproc);
+
+                spin_lock(&hspace->radix_lock);
                 radix_tree_delete(&hspace->hprocs_mm_tree_root,
                                 (unsigned long) hproc->mm);
-                mutex_lock(&heca_state->heca_state_mutex);
+                spin_unlock(&hspace->radix_lock);
+
+                spin_lock(&heca_state->radix_lock);
                 radix_tree_delete(&heca_state->mm_tree_root,
                                 (unsigned long) hproc->mm);
-                mutex_unlock(&heca_state->heca_state_mutex);
+                spin_unlock(&heca_state->radix_lock);
         }
 
         remove_hproc_from_descriptors(hproc);
@@ -401,38 +407,42 @@ preload:
                 goto out;
         }
 
-
+        spin_lock(&hspace->radix_lock);
         r = radix_tree_insert(&hspace->hprocs_tree_root,
                         (unsigned long) new_hproc->hproc_id, new_hproc);
-        if (r)
+        if(r)
                 goto preload_out;
 
-        if (is_hproc_local(new_hproc)) {
+        if (is_hproc_local(new_hproc))
+        {
                 r = radix_tree_insert(&hspace->hprocs_mm_tree_root,
                                 (unsigned long) new_hproc->mm, new_hproc);
                 if(r)
                         goto hspace_mm_fail;
-                mutex_lock(&heca_state->heca_state_mutex);
+                spin_unlock(&hspace->radix_lock);
+                spin_lock(&heca_state->radix_lock);
                 r = radix_tree_insert(&heca_state->mm_tree_root,
                                 (unsigned long) new_hproc->mm, new_hproc);
-                mutex_unlock(&heca_state->heca_state_mutex);
                 if(r)
                         goto hstate_mm_fail;
-        }
+                spin_unlock(&heca_state->radix_lock);
+        } else
+                spin_unlock(&hspace->radix_lock);
 
         list_add(&new_hproc->hproc_ptr, &hspace->hprocs_list);
         radix_tree_preload_end();
         return r;
 
 hstate_mm_fail:
-
         radix_tree_delete(&hspace->hprocs_mm_tree_root,
                         (unsigned long) new_hproc->mm);
+        spin_unlock(&heca_state->radix_lock);
 hspace_mm_fail:
 
         radix_tree_delete(&hspace->hprocs_tree_root,
                         (unsigned long) new_hproc->hproc_id);
 preload_out:
+        spin_unlock(&hspace->radix_lock);
         radix_tree_preload_end();
 out:
         return r;
@@ -441,8 +451,8 @@ out:
 int create_hproc(struct hecaioc_hproc *hproc_info)
 {
         struct heca_module_state *heca_state = get_heca_module_state();
+        struct heca_space  *hspace;
         int r = 0;
-        struct heca_space *hspace;
         struct heca_process *new_hproc = NULL;
 
         /* allocate a new hproc */
@@ -450,6 +460,11 @@ int create_hproc(struct hecaioc_hproc *hproc_info)
         if (!new_hproc) {
                 heca_printk(KERN_ERR "failed kzalloc");
                 return -ENOMEM;
+        }
+        hspace = find_hspace(hproc_info->hspace_id);
+        if (!hspace){
+                kfree(new_hproc);
+                return -EINVAL;
         }
 
         mutex_lock(&hspace->hspace_mutex);
@@ -466,9 +481,9 @@ int create_hproc(struct hecaioc_hproc *hproc_info)
         new_hproc->pid = hproc_info->pid;
         new_hproc->hspace = hspace;
         /* assign descriptor for remote hproc */
-        if (!is_hproc_local(new_hproc)) {
+        if (!hproc_info->is_local) {
                 u32 hproc_ids[] = {new_hproc->hproc_id, 0};
-                r = connect_hproc(hproc_info->hspace_id, hproc_info->hproc_id,
+                r = connect_hproc(hspace, new_hproc,
                                 hproc_info->remote.sin_addr.s_addr,
                                 hproc_info->remote.sin_port);
                 if (r) {
@@ -603,6 +618,8 @@ static int remove_hproc(struct heca_space *hspace, struct heca_process *hproc)
         /* we remove the kobject entry */
         mutex_unlock(&hspace->hspace_mutex);
         kobject_del(&hproc->kobj);
+        heca_printk(KERN_INFO "Hproc: %p deregister succesfull ,hspace_id: %u , hproc id %u",
+                        hproc, hspace->hspace_id, hproc->hproc_id);
         return 0;
 }
 
@@ -640,7 +657,10 @@ struct heca_process *find_local_hproc_from_list(struct heca_space *hspace)
  * Teardown operation
  */
 
-void  teardown_hproc(struct heca_space *hspace, struct heca_process *hproc){
+void  teardown_hproc(struct heca_space *hspace, struct heca_process *hproc)
+{
+        heca_printk(KERN_INFO "Tearing Down hproc: %p,hspace_id: %u , hproc id %u",
+                        hproc, hspace->hspace_id, hproc->hproc_id);
         /* cleanup the hproc */
         if(!remove_hproc(hspace, hproc))
                 kobject_put(&hproc->kobj);

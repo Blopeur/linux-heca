@@ -1644,30 +1644,12 @@ err1: erase_rb_conn(conn);
 err: return -1;
 }
 
-int connect_hproc(__u32 hspace_id, __u32 hproc_id, unsigned long ip_addr,
-                unsigned short port)
+int connect_hproc(struct heca_space *hspace, struct heca_process *hproc,
+                unsigned long ip_addr, unsigned short port)
 {
         int r = 0;
-        struct heca_space *hspace;
-        struct heca_process *hproc;
         struct heca_connection *conn;
         struct heca_module_state *heca_state = get_heca_module_state();
-
-        hspace = find_hspace(hspace_id);
-        if (!hspace) {
-                heca_printk(KERN_ERR "can't find hspace %d", hspace_id);
-                return -EFAULT;
-        }
-
-        heca_printk(KERN_ERR "connecting to hspace_id: %u [0x%p], hproc_id: %u",
-                        hspace_id, hspace, hproc_id);
-
-        mutex_lock(&hspace->hspace_mutex);
-        hproc = find_hproc(hspace, hproc_id);
-        if (!hproc) {
-                heca_printk(KERN_ERR "can't find hproc %d", hproc_id);
-                goto no_hproc;
-        }
 
         conn = search_rb_conn(ip_addr);
         if (conn) {
@@ -1701,11 +1683,6 @@ done:
         hproc->connection = conn;
 
 failed:
-        hproc_put(hproc);
-no_hproc:
-        mutex_unlock(&hspace->hspace_mutex);
-        heca_printk(KERN_INFO "hspace %d hproc %d hproc_connect ip %pI4: %d",
-                        hspace_id, hproc_id, &ip_addr, r);
         return r;
 }
 

@@ -39,7 +39,8 @@ void release_tx_element_reply(struct heca_connection *,
                 struct tx_buffer_element *);
 void try_release_tx_element(struct heca_connection *,
                 struct tx_buffer_element *);
-int connect_hproc(__u32, __u32, unsigned long, unsigned short);
+int connect_hproc(struct heca_space *, struct heca_process *, unsigned long,
+                unsigned short);
 unsigned long inet_addr(const char *);
 char *inet_ntoa(unsigned long, char *, int);
 struct tx_buffer_element *try_get_next_empty_tx_ele(

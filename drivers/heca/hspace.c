@@ -28,11 +28,15 @@ static void teardown_hprocs(struct heca_space *hspace)
         struct heca_process *hproc;
         struct list_head *pos, *n;
 
+        heca_printk(KERN_INFO "Tearing down HPROCs for hspace : %u",
+                        hspace->hspace_id );
         list_for_each_safe (pos, n, &hspace->hprocs_list) {
                 hproc = list_entry(pos, struct heca_process, hproc_ptr);
                 teardown_hproc(hspace, hproc);
         }
 
+        heca_printk(KERN_INFO "unregistering the kset fo hproc : %u",
+                        hspace->hspace_id );
         kset_unregister(hspace->hprocs_kset);
 }
 
@@ -115,7 +119,7 @@ int deregister_hspace(__u32 hspace_id)
         int ret = 0;
         struct heca_space *hspace;
         struct list_head *curr, *next;
-        /*fIXME: why do weneed to scan through the list.. we should have a
+        /*FIXME: why do weneed to scan through the list.. we should have a
          * single HSPACE !
          */
         list_for_each_safe (curr, next, &heca_state->hspaces_list) {
@@ -197,6 +201,7 @@ int create_hspace(__u32 hspace_id)
         }
         new_hspace->hspace_id = hspace_id;
         mutex_init(&new_hspace->hspace_mutex);
+        spin_lock_init(&new_hspace->radix_lock);
         INIT_RADIX_TREE(&new_hspace->hprocs_tree_root,
                         GFP_KERNEL & ~__GFP_WAIT);
         INIT_RADIX_TREE(&new_hspace->hprocs_mm_tree_root,

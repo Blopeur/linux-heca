@@ -55,7 +55,7 @@ static int ioctl_mr(int ioctl, void __user *argp)
         }
 
         /*FIXME add more check*/
-        if(udata.hmr_id ==0)
+        if(udata.hmr_id == 0)
                 return -EINVAL;
         if(udata.sz == 0)
                 return -EINVAL;
@@ -122,7 +122,6 @@ long heca_ioctl(struct file *f, unsigned int ioctl, unsigned long arg)
         void __user *argp = (void __user *) arg;
         int r = -EINVAL;
 
-        heca_printk(KERN_DEBUG "<enter> ioctl=0x%X", ioctl);
 
         /* special case: no need for prior hspace in process */
         switch (ioctl) {
@@ -146,6 +145,5 @@ long heca_ioctl(struct file *f, unsigned int ioctl, unsigned long arg)
         }
 
 out:
-        heca_printk(KERN_DEBUG "<exit> ioctl=0x%X: %d", ioctl, r);
         return r;
 }
