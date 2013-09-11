@@ -68,6 +68,43 @@ static inline int deregister_hspace(struct heca_space *hspace)
         return 0;
 }
 
+static inline int register_hspace(struct heca_module_state *heca_state,
+                struct heca_space *hspace)
+{
+        int r =0;
+
+        while (1) {
+                r = radix_tree_preload(GFP_HIGHUSER_MOVABLE & GFP_KERNEL);
+                if (!r)
+                        break;
+
+                if (r == -ENOMEM) {
+                        mdelay(2);
+                        continue;
+                }
+
+                goto failed;
+        }
+        mutex_lock(&heca_state->heca_state_mutex);
+
+        if(hspace_is_registered(heca_state, hspace->hspace_id))
+                goto exit;
+
+        spin_lock(&heca_state->radix_lock);
+        r = radix_tree_insert(&heca_state->hspaces_tree_root,
+                        (unsigned long) hspace->hspace_id, hspace);
+        spin_lock(&heca_state->radix_lock);
+        if(r)
+                goto exit;
+        list_add(&hspace->hspace_ptr, &heca_state->hspaces_list);
+exit:
+        mutex_unlock(&heca_state->heca_state_mutex);
+        radix_tree_preload_end();
+failed:
+        return r;
+
+}
+
 
 static void teardown_hprocs(struct heca_space *hspace)
 {
@@ -198,14 +235,9 @@ out:
 static inline int create_hspace(__u32 hspace_id)
 {
         int r = 0;
-        struct heca_space *found_hspace, *new_hspace = NULL;
+        struct heca_space *new_hspace = NULL;
         struct heca_module_state *heca_state = get_heca_module_state();
 
-        /* already exists? (first check; the next one is under lock */
-        found_hspace = find_hspace(hspace_id);
-        if (found_hspace) {
-                return -EEXIST;
-        }
 
         /* allocate a new hspace */
         new_hspace = kzalloc(sizeof(*new_hspace), GFP_KERNEL);
@@ -221,29 +253,9 @@ static inline int create_hspace(__u32 hspace_id)
                         GFP_KERNEL & ~__GFP_WAIT);
         INIT_LIST_HEAD(&new_hspace->hprocs_list);
 
-        while (1) {
-                r = radix_tree_preload(GFP_HIGHUSER_MOVABLE & GFP_KERNEL);
-                if (!r)
-                        break;
-
-                if (r == -ENOMEM) {
-                        mdelay(2);
-                        continue;
-                }
-
-                goto failed;
-        }
-
-        spin_lock(&heca_state->radix_lock);
-        r = radix_tree_insert(&heca_state->hspaces_tree_root,
-                        (unsigned long) new_hspace->hspace_id, new_hspace);
-        spin_unlock(&heca_state->radix_lock);
-        radix_tree_preload_end();
-
-        if (r)
+        if(register_hspace(heca_state, new_hspace))
                 goto failed;
 
-        list_add(&new_hspace->hspace_ptr, &heca_state->hspaces_list);
         new_hspace->kobj.kset = heca_state->hspaces_kset;
         r = kobject_init_and_add(&new_hspace->kobj, &ktype_hspace, NULL,
                         HSPACE_KOBJECT, hspace_id);
