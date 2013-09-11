@@ -55,14 +55,15 @@ struct heca_process {
         struct rb_root push_cache;
         seqlock_t push_cache_lock;
 
-        struct kobject kobj;
-        struct kset *hmrs_kset;
-
         struct llist_head delayed_gup;
         struct delayed_work delayed_gup_work;
 
         struct llist_head deferred_gups;
         struct work_struct deferred_gup_work;
+
+        struct kobject kobj;
+        struct kset *hmrs_kset;
+        struct rcu_head rcu;
 
 };
 

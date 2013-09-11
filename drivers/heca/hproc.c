@@ -22,7 +22,20 @@
 #define HMRS_KSET               "memory_regions"
 
 #define to_hproc(p)             container_of(p, struct heca_process, kobj)
+#define to_hproc_from_rcu(m)    container_of(m,struct heca_process, rcu)
 #define to_hproc_attr(pa)       container_of(pa, struct hproc_attr, attr)
+
+
+/*
+ * Release function
+ */
+
+static void free_hproc_rcu(struct rcu_head *rcu){
+        struct heca_process *hproc = to_hproc_from_rcu(rcu);
+        heca_printk(KERN_INFO "Releasing hproc : %p ,  hproc_id: %u", hproc,
+                        hproc->hproc_id);
+        kfree(hproc);
+}
 
 /*
  * Hproc refcount
@@ -64,11 +77,7 @@ struct hproc_attr {
 static void kobj_hproc_release(struct kobject *k)
 {
         struct heca_process *hproc = to_hproc(k);
-        heca_printk(KERN_INFO "releasing hproc %p, hproc_id: %u hspace_id: %u ",
-                        hproc, hproc->hproc_id, hproc->hspace->hspace_id );
-        trace_heca_free_hproc(hproc->hproc_id);
-        synchronize_rcu();
-        kfree(hproc);
+        call_rcu(&hproc->rcu, free_hproc_rcu);
 }
 
 static ssize_t hproc_show(struct kobject *k, struct attribute *a,
