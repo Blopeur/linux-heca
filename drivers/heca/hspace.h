@@ -30,8 +30,7 @@ struct heca_space {
 };
 
 struct heca_space *find_hspace(u32);
-int create_hspace(__u32);
-int deregister_hspace(__u32 );
-int register_hspace(struct hecaioc_hspace *);
+int instantiate_hspace(struct hecaioc_hspace *);
 void teardown_hspace(struct heca_space *);
+int teardown_hspace_by_id(__u32 );
 #endif /* HSPACE_H_ */

@@ -67,6 +67,25 @@ void teardown_hspace(struct heca_space *hspace)
 }
 
 
+
+int teardown_hspace_by_id(__u32 hspace_id)
+{
+        struct heca_module_state *heca_state = get_heca_module_state();
+        int ret = 0;
+        struct heca_space *hspace;
+        struct list_head *curr, *next;
+        /*FIXME: why do weneed to scan through the list.. we should have a
+         * single HSPACE !
+         */
+        list_for_each_safe (curr, next, &heca_state->hspaces_list) {
+                hspace = list_entry(curr, struct heca_space, hspace_ptr);
+                if (hspace->hspace_id == hspace_id)
+                        teardown_hspace(hspace);
+        }
+
+        destroy_htm_listener(heca_state->htm);
+        return ret;
+}
 /*
  * Heca Space  Kobject
  */
@@ -124,44 +143,6 @@ static struct kobj_type ktype_hspace = {
  * Main Hspace function
  */
 
-int deregister_hspace(__u32 hspace_id)
-{
-        struct heca_module_state *heca_state = get_heca_module_state();
-        int ret = 0;
-        struct heca_space *hspace;
-        struct list_head *curr, *next;
-        /*FIXME: why do weneed to scan through the list.. we should have a
-         * single HSPACE !
-         */
-        list_for_each_safe (curr, next, &heca_state->hspaces_list) {
-                hspace = list_entry(curr, struct heca_space, hspace_ptr);
-                if (hspace->hspace_id == hspace_id)
-                        teardown_hspace(hspace);
-        }
-
-        destroy_htm_listener(heca_state->htm);
-        return ret;
-}
-
-int register_hspace(struct hecaioc_hspace *hspace_info)
-{
-        struct heca_module_state *heca_state = get_heca_module_state();
-        int rc;
-
-        heca_printk(KERN_INFO "creating htm listener");
-        rc = create_htm_listener(heca_state, hspace_info->local.sin_addr.s_addr,
-                        hspace_info->local.sin_port);
-        if (rc)
-                return rc;
-
-        rc = create_hspace(hspace_info->hspace_id);
-        if (rc) {
-                heca_printk(KERN_ERR "create_hspace %d failed", rc);
-                /* FIXME: add the htm release here*/
-        }
-
-        return rc;
-}
 
 /* FIXME : maybe create a find_get as well for refcount ...*/
 struct heca_space *find_hspace(u32 id)
@@ -192,8 +173,7 @@ out:
 }
 
 
-
-int create_hspace(__u32 hspace_id)
+static inline int create_hspace(__u32 hspace_id)
 {
         int r = 0;
         struct heca_space *found_hspace, *new_hspace = NULL;
@@ -265,4 +245,24 @@ kobj_fail:
         return r;
 
 
+}
+
+int instantiate_hspace(struct hecaioc_hspace *hspace_info)
+{
+        struct heca_module_state *heca_state = get_heca_module_state();
+        int rc;
+
+        heca_printk(KERN_INFO "creating htm listener");
+        rc = create_htm_listener(heca_state, hspace_info->local.sin_addr.s_addr,
+                        hspace_info->local.sin_port);
+        if (rc)
+                return rc;
+
+        rc = create_hspace(hspace_info->hspace_id);
+        if (rc) {
+                heca_printk(KERN_ERR "create_hspace %d failed", rc);
+                /* FIXME: add the htm release here*/
+        }
+
+        return rc;
 }

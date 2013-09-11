@@ -106,9 +106,9 @@ static long ioctl_hspace(unsigned int ioctl, void __user *argp)
         switch (ioctl) {
         case HECAIOC_HSPACE_ADD:
                 heca_printk(KERN_INFO "registering hspace");
-                return register_hspace(&hspace_info);
+                return instantiate_hspace(&hspace_info);
         case HECAIOC_HSPACE_RM:
-                return deregister_hspace(hspace_info.hspace_id);
+                return teardown_hspace_by_id(hspace_info.hspace_id);
         default:
                 goto failed;
         }
