@@ -38,6 +38,37 @@ static void free_hspace_rcu(struct rcu_head *rcu){
  * Creator / destructor
  */
 
+/* need to be called holding the heca module state mutex */
+static inline int hspace_is_registered(struct heca_module_state *hms, u32 id)
+{
+
+        struct heca_space *hspace;
+        list_for_each_entry(hspace, &hms->hspaces_list, hspace_ptr){
+                if(hspace->hspace_id == id)
+                        return 0;
+        }
+        return -1;
+}
+
+static inline int deregister_hspace(struct heca_space *hspace)
+{
+        struct heca_module_state *heca_state = get_heca_module_state();
+
+        mutex_lock(&heca_state->heca_state_mutex);
+        if(hspace_is_registered(heca_state, hspace->hspace_id)){
+                mutex_unlock(&heca_state->heca_state_mutex);
+                return -1;
+        }
+        list_del(&hspace->hspace_ptr);
+        spin_lock(&heca_state->radix_lock);
+        radix_tree_delete(&heca_state->hspaces_tree_root,
+                        (unsigned long) hspace->hspace_id);
+        spin_unlock(&heca_state->radix_lock);
+        mutex_unlock(&heca_state->heca_state_mutex);
+        return 0;
+}
+
+
 static void teardown_hprocs(struct heca_space *hspace)
 {
         struct heca_process *hproc;
@@ -59,6 +90,8 @@ void teardown_hspace(struct heca_space *hspace)
 {
         heca_printk(KERN_INFO "Tearing Down hspace %p,hspace_id: %u ", hspace,
                         hspace->hspace_id );
+        if(deregister_hspace(hspace))
+                return;
         teardown_hprocs(hspace);
         /* we remove sysfs entry */
         kobject_del(&hspace->kobj);
@@ -99,17 +132,6 @@ struct hspace_attr {
 static void kobj_hspace_release(struct kobject *k)
 {
         struct heca_space *hspace = to_hspace(k);
-        struct heca_module_state *heca_state = get_heca_module_state();
-
-        BUG_ON(!hspace);
-
-        heca_printk(KERN_INFO "releasing hspace %p, hspace_id: %u ", hspace,
-                        hspace->hspace_id);
-        mutex_lock(&heca_state->heca_state_mutex);
-        list_del(&hspace->hspace_ptr);
-        radix_tree_delete(&heca_state->hspaces_tree_root,
-                        (unsigned long) hspace->hspace_id);
-        mutex_unlock(&heca_state->heca_state_mutex);
 
         call_rcu(&hspace->rcu, free_hspace_rcu);
 }
