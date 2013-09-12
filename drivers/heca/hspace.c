@@ -18,8 +18,46 @@
 #define HPROCS_KSET             "hprocs"
 
 #define to_hspace(s)            container_of(s, struct heca_space, kobj)
-#define to_hspace_from_rcu(m)    container_of(m,struct heca_space, rcu)
+#define to_hspace_from_rcu(m)   container_of(m, struct heca_space, rcu)
+#define to_hspace_from_kref(m)  container_of(m, struct heca_space, kref)
 #define to_hspace_attr(sa)      container_of(sa, struct hspace_attr, attr)
+
+/*
+ * Hspace refcount
+ */
+
+
+static inline void hspace_release(struct kref *kref)
+{
+        struct heca_space *hspace = to_hspace_from_kref(kref);
+        /* we remove sysfs entry */
+        kobject_del(&hspace->kobj);
+        /* move refcount to zero and free it */
+        kobject_put(&hspace->kobj);
+}
+
+
+int hspace_put(struct heca_space *hspace)
+{
+        if(hspace)
+                return kref_put(&hspace->kref, hspace_release);
+        return 0;
+}
+
+
+void hspace_get(struct heca_space *hspace)
+{
+        if(hspace)
+                kref_get(&hspace->kref);
+}
+
+struct heca_space * __must_check hspace_get_unless_zero(
+                struct heca_space *hspace)
+{
+        if(hspace && kref_get_unless_zero(&hspace->kref))
+                return hspace;
+        return NULL;
+}
 
 
 /*
@@ -129,12 +167,11 @@ void teardown_hspace(struct heca_space *hspace)
         heca_printk(KERN_INFO "Tearing Down hspace %p,hspace_id: %u ", hspace,
                         hspace->hspace_id );
         if(deregister_hspace(hspace))
-                return;
+                goto exit;
         teardown_hprocs(hspace);
-        /* we remove sysfs entry */
-        kobject_del(&hspace->kobj);
-        /* move refcount to zero and free it */
-        kobject_put(&hspace->kobj);
+/*        hspace_put(hspace);*/
+exit:
+        hspace_put(hspace);
 }
 
 
@@ -245,6 +282,7 @@ static inline int create_hspace(__u32 hspace_id)
         if (!new_hspace) {
                 return -ENOMEM;
         }
+        kref_init(&new_hspace->kref);
         new_hspace->hspace_id = hspace_id;
         mutex_init(&new_hspace->hspace_mutex);
         spin_lock_init(&new_hspace->radix_lock);
@@ -253,9 +291,6 @@ static inline int create_hspace(__u32 hspace_id)
         INIT_RADIX_TREE(&new_hspace->hprocs_mm_tree_root,
                         GFP_KERNEL & ~__GFP_WAIT);
         INIT_LIST_HEAD(&new_hspace->hprocs_list);
-
-        if(register_hspace(heca_state, new_hspace))
-                goto failed;
 
         new_hspace->kobj.kset = heca_state->hspaces_kset;
         r = kobject_init_and_add(&new_hspace->kobj, &ktype_hspace, NULL,
@@ -266,12 +301,15 @@ static inline int create_hspace(__u32 hspace_id)
                         &new_hspace->kobj);
         if(!new_hspace->hprocs_kset)
                 goto kset_fail;
+        if(register_hspace(heca_state, new_hspace))
+                goto reg_failed;
+
         heca_printk("registered hspace %p, hspace_id : %u, res: %d",
                         new_hspace, hspace_id, r);
         return r;
 
-failed:
-        kfree(new_hspace);
+reg_failed:
+        hspace_put(new_hspace);
         return r;
 kset_fail:
         kobject_del(&new_hspace->kobj);
