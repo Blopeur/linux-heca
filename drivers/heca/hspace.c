@@ -75,7 +75,7 @@ static inline int deregister_hspace(struct heca_space *hspace)
 static inline int register_hspace(struct heca_module_state *heca_state,
                 struct heca_space *hspace)
 {
-        int r =0;
+        int r = 0;
 
         while (1) {
                 r = radix_tree_preload(GFP_HIGHUSER_MOVABLE & GFP_KERNEL);
@@ -91,13 +91,14 @@ static inline int register_hspace(struct heca_module_state *heca_state,
         }
         mutex_lock(&heca_state->heca_state_mutex);
 
-        if(hspace_is_registered(heca_state, hspace->hspace_id))
+        if(!hspace_is_registered(heca_state, hspace->hspace_id)){
+                r = -EEXIST;
                 goto exit;
-
+        }
         spin_lock(&heca_state->radix_lock);
         r = radix_tree_insert(&heca_state->hspaces_tree_root,
                         (unsigned long) hspace->hspace_id, hspace);
-        spin_lock(&heca_state->radix_lock);
+        spin_unlock(&heca_state->radix_lock);
         if(r)
                 goto exit;
         list_add(&hspace->hspace_ptr, &heca_state->hspaces_list);
