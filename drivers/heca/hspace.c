@@ -169,7 +169,7 @@ void teardown_hspace(struct heca_space *hspace)
         if(deregister_hspace(hspace))
                 goto exit;
         teardown_hprocs(hspace);
-/*        hspace_put(hspace);*/
+        /*        hspace_put(hspace);*/
 exit:
         hspace_put(hspace);
 }
@@ -241,8 +241,7 @@ static struct kobj_type ktype_hspace = {
  */
 
 
-/* FIXME : maybe create a find_get as well for refcount ...*/
-struct heca_space *find_hspace(u32 id)
+struct heca_space *search_for_hspace(u32 id, int get)
 {
         struct heca_module_state *heca_state = get_heca_module_state();
         struct heca_space *hspace;
@@ -263,12 +262,13 @@ repeat:
                         if (radix_tree_deref_retry(hspace))
                                 goto repeat;
                 }
+                if(get && !hspace_get_unless_zero(hspace))
+                        goto repeat;
         }
 out:
         rcu_read_unlock();
         return hspace;
 }
-
 
 static inline int create_hspace(__u32 hspace_id)
 {

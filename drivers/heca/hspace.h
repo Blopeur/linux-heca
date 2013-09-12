@@ -30,10 +30,16 @@ struct heca_space {
         struct kref kref;
 };
 
+struct heca_space *search_for_hspace(u32, int);
+
+#define find_get_hspace(id)     search_for_hspace(id,1)
+#define find_hspace(id)         search_for_hspace(id,0)
+
+
+
 int hspace_put(struct heca_space *);
 void hspace_get(struct heca_space *);
 struct heca_space * __must_check hspace_get_unless_zero(struct heca_space *);
-struct heca_space *find_hspace(u32);
 int instantiate_hspace(struct hecaioc_hspace *);
 void teardown_hspace(struct heca_space *);
 int teardown_hspace_by_id(__u32 );
