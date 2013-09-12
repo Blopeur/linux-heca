@@ -531,7 +531,6 @@ int create_hproc(struct hecaioc_hproc *hproc_info)
                 new_hproc->mm = mm;
                 new_hproc->hmr_tree_root = RB_ROOT;
                 seqlock_init(&new_hproc->hmr_seq_lock);
-                new_hproc->hmr_cache = NULL;
 
                 init_llist_head(&new_hproc->delayed_gup);
                 INIT_DELAYED_WORK(&new_hproc->delayed_gup_work,

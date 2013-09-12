@@ -49,7 +49,6 @@ struct heca_process {
 
         struct radix_tree_root hmr_id_tree_root;
         struct rb_root hmr_tree_root;
-        struct heca_memory_region *hmr_cache;
         seqlock_t hmr_seq_lock;
 
         struct rb_root push_cache;

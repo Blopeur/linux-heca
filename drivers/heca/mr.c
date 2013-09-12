@@ -207,14 +207,8 @@ struct heca_memory_region *search_heca_mr_by_addr(struct heca_process *hproc,
 {
         struct rb_root *root = &hproc->hmr_tree_root;
         struct rb_node *node;
-        struct heca_memory_region *this = hproc->hmr_cache;
+        struct heca_memory_region *this;
         unsigned long seq;
-
-        /* try to follow cache hint */
-        if (likely(this)) {
-                if (addr >= this->addr && addr < this->addr + this->sz)
-                        goto out;
-        }
 
         do {
                 seq = read_seqbegin(&hproc->hmr_seq_lock);
@@ -233,9 +227,6 @@ struct heca_memory_region *search_heca_mr_by_addr(struct heca_process *hproc,
                                 break;
                 }
         } while (read_seqretry(&hproc->hmr_seq_lock, seq));
-
-        if (likely(this))
-                hproc->hmr_cache = this;
 
 out:
         return this;
