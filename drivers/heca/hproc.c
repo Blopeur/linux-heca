@@ -23,6 +23,7 @@
 
 #define to_hproc(p)             container_of(p, struct heca_process, kobj)
 #define to_hproc_from_rcu(m)    container_of(m,struct heca_process, rcu)
+#define to_hproc_from_kref(m)   container_of(m, struct heca_process, kref)
 #define to_hproc_attr(pa)       container_of(pa, struct hproc_attr, attr)
 
 
@@ -37,23 +38,34 @@ static void free_hproc_rcu(struct rcu_head *rcu){
         kfree(hproc);
 }
 
+static void hproc_release(struct kref *kref)
+{
+        struct heca_process *hproc = to_hproc_from_kref(kref);
+
+        kset_unregister(hproc->hmrs_kset);
+        kobject_del(&hproc->kobj);
+        /* final put for releasing the object*/
+        kobject_put(&hproc->kobj);
+}
+
+
 /*
  * Hproc refcount
  */
 
 struct heca_process *hproc_get(struct heca_process *hproc)
 {
-        if(hproc)
-                if(kobject_get(&hproc->kobj))
-                        return hproc;
-        return NULL;
+        if(!hproc)
+                return NULL;
+        kref_get(&hproc->kref);
+        return hproc;
 }
 
 struct heca_process * __must_check hproc_get_unless_zero(
                 struct heca_process *hproc)
 {
         if(hproc)
-                if(kref_get_unless_zero(&hproc->kobj.kref))
+                if(kref_get_unless_zero(&hproc->kref))
                         return hproc;
         return NULL;
 }
@@ -61,7 +73,7 @@ struct heca_process * __must_check hproc_get_unless_zero(
 void hproc_put(struct heca_process *hproc)
 {
         if(hproc)
-                kobject_put(&hproc->kobj);
+                kref_put(&hproc->kref, hproc_release);
 }
 
 /*
@@ -311,7 +323,6 @@ static void destroy_hproc_mrs(struct heca_process *hproc)
                         write_sequnlock(&hproc->hmr_seq_lock);
         } while(1);
 
-        kset_unregister(hproc->hmrs_kset);
 }
 
 static inline void release_local_hproc(struct heca_process *hproc)
@@ -319,7 +330,7 @@ static inline void release_local_hproc(struct heca_process *hproc)
         struct heca_module_state *heca_state = get_heca_module_state();
         struct rb_root *root;
         struct rb_node *node;
-       /*FIXME : do we need to protect the scan ?*/
+        /*FIXME : do we need to protect the scan ?*/
         if (heca_state->htm) {
                 root = &heca_state->htm->connections_rb_tree_root;
                 for (node = rb_first(root);
@@ -372,9 +383,13 @@ static inline int hproc_exist(struct heca_space *hspace, u32 id)
 }
 
 /* the hspace_mutex needs to be take to execute this function */
-static inline void deregister_hproc(struct heca_module_state *heca_state,
+static inline int deregister_hproc(struct heca_module_state *heca_state,
                 struct heca_space *hspace, struct heca_process *hproc)
 {
+
+        if(hproc_exist(hspace, hproc->hproc_id))
+                return -1;
+
         spin_lock(&hspace->radix_lock);
         radix_tree_delete(&hspace->hprocs_tree_root,
                         (unsigned long) hproc->hproc_id);
@@ -397,6 +412,7 @@ static inline void deregister_hproc(struct heca_module_state *heca_state,
 
         remove_hproc_from_descriptors(hproc);
         list_del(&hproc->hproc_ptr);
+        return 0;
 }
 
 static inline int register_hproc(struct heca_module_state *heca_state,
@@ -485,6 +501,7 @@ int create_hproc(struct hecaioc_hproc *hproc_info)
         }
 
         /* initial hproc data */
+        kref_init(&new_hproc->kref);
         new_hproc->hproc_id = hproc_info->hproc_id;
         new_hproc->is_local = hproc_info->is_local;
         new_hproc->pid = hproc_info->pid;
@@ -532,11 +549,6 @@ int create_hproc(struct hecaioc_hproc *hproc_info)
                 seqlock_init(&new_hproc->push_cache_lock);
         }
 
-        /* register hproc by id and mm_struct (must come before hspace_get_descriptor) */
-        r = register_hproc(heca_state, hspace, new_hproc);
-        if (r)
-                goto reg_fail;
-
         /* SYFS stuff*/
         new_hproc->kobj.kset = hspace->hprocs_kset;
         r = kobject_init_and_add(&new_hproc->kobj, &ktype_hproc, NULL,
@@ -548,6 +560,11 @@ int create_hproc(struct hecaioc_hproc *hproc_info)
                         &new_hproc->kobj);
         if(!new_hproc->hmrs_kset)
                 goto kset_fail;
+        /* register hproc by id and mm_struct (must come before hspace_get_descriptor) */
+        r = register_hproc(heca_state, hspace, new_hproc);
+        if (r)
+                goto reg_fail;
+
         mutex_unlock(&hspace->hspace_mutex);
 
         heca_printk(KERN_INFO "hproc %p, res %d, hspace_id %u, hproc_id: %u --> ret %d",
@@ -564,25 +581,16 @@ no_mm:
         return r;
 reg_fail:
         mutex_unlock(&hspace->hspace_mutex);
-        if(!is_hproc_local(new_hproc)){
-                release_connection_remote_hproc(hspace, new_hproc);
-                remove_hproc_from_descriptors(new_hproc);
-        }
-
-        kfree(new_hproc);
-        new_hproc = NULL;
+        hproc_put(new_hproc);
         return r;
 
 kset_fail:
-        kobject_del(&new_hproc->kobj);
-kobj_err:
-        deregister_hproc(heca_state, hspace, new_hproc);
         mutex_unlock(&hspace->hspace_mutex);
-        if(!is_hproc_local(new_hproc))
-        {
-                release_connection_remote_hproc(hspace, new_hproc);
-                remove_hproc_from_descriptors(new_hproc);
-        }
+        kobject_del(&new_hproc->kobj);
+        kobject_put(&new_hproc->kobj);
+        return r;
+kobj_err:
+        mutex_unlock(&hspace->hspace_mutex);
         kobject_put(&new_hproc->kobj);
         return r;
 }
@@ -593,11 +601,10 @@ static int remove_hproc(struct heca_space *hspace, struct heca_process *hproc)
 
         struct heca_module_state *heca_state = get_heca_module_state();
         mutex_lock(&hspace->hspace_mutex);
-        if(hproc_exist(hspace, hproc->hproc_id)){
+        if(deregister_hproc(heca_state, hspace, hproc)){
                 mutex_unlock(&hspace->hspace_mutex);
                 return -1;
         }
-        deregister_hproc(heca_state, hspace, hproc);
         /*
          * we removed the hproc from all descriptors and trees, so we won't make any
          * new operations concerning it. now we only have to make sure to cancel
@@ -626,7 +633,6 @@ static int remove_hproc(struct heca_space *hspace, struct heca_process *hproc)
 
         /* we remove the kobject entry */
         mutex_unlock(&hspace->hspace_mutex);
-        kobject_del(&hproc->kobj);
         heca_printk(KERN_INFO "Hproc: %p deregister succesfull ,hspace_id: %u , hproc id %u",
                         hproc, hspace->hspace_id, hproc->hproc_id);
         return 0;
@@ -672,9 +678,8 @@ void  teardown_hproc(struct heca_space *hspace, struct heca_process *hproc)
                         hproc, hspace->hspace_id, hproc->hproc_id);
         /* cleanup the hproc */
         if(!remove_hproc(hspace, hproc))
-                kobject_put(&hproc->kobj);
-        /* final put for releasing the object*/
-        kobject_put(&hproc->kobj);
+                hproc_put(hproc);
+        hproc_put(hproc);
 
 }
 

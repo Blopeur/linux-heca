@@ -64,6 +64,7 @@ struct heca_process {
         struct kobject kobj;
         struct kset *hmrs_kset;
         struct rcu_head rcu;
+        struct kref kref;
 
 };
 
