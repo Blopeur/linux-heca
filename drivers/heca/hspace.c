@@ -18,12 +18,8 @@
 #define HPROCS_KSET             "hprocs"
 
 #define to_hspace(s)            container_of(s, struct heca_space, kobj)
-#define to_hspace_from_rcu(m)   container_of(m,struct heca_space, rcu)
-#define to_hspace_from_kref(m)  container_of(m,struct heca_space, kref)
+#define to_hspace_from_rcu(m)    container_of(m,struct heca_space, rcu)
 #define to_hspace_attr(sa)      container_of(sa, struct hspace_attr, attr)
-
-
-
 
 
 /*
@@ -133,11 +129,12 @@ void teardown_hspace(struct heca_space *hspace)
         heca_printk(KERN_INFO "Tearing Down hspace %p,hspace_id: %u ", hspace,
                         hspace->hspace_id );
         if(deregister_hspace(hspace))
-                goto exit;
-        hspace_put(hspace);
+                return;
         teardown_hprocs(hspace);
-exit:
-        hspace_put(hspace);
+        /* we remove sysfs entry */
+        kobject_del(&hspace->kobj);
+        /* move refcount to zero and free it */
+        kobject_put(&hspace->kobj);
 }
 
 
@@ -160,42 +157,6 @@ int teardown_hspace_by_id(__u32 hspace_id)
         destroy_htm_listener(heca_state->htm);
         return ret;
 }
-
-static inline void hspace_release(struct kref *kref)
-{
-        struct heca_space *hspace = to_hspace_from_kref(kref);
-
-        /* we remove sysfs entry */
-        kobject_del(&hspace->kobj);
-        /* move refcount to zero and free it */
-        kobject_put(&hspace->kobj);
-}
-
-/*
- * Hsapce refcount
- */
-
-struct heca_space * __must_check hspace_get_unless_zero(
-                struct heca_space *hspace)
-{
-        if(hspace && kref_get_unless_zero(&hspace->kref))
-                return hspace;
-        return NULL;
-}
-
-void hspace_get(struct heca_space *hspace)
-{
-        if(hspace)
-                kref_get(&hspace->kref);
-}
-
-int hspace_put(struct heca_space *hspace)
-{
-        if (hspace)
-                return kref_put(&hspace->kref, hspace_release);
-        return 0;
-}
-
 /*
  * Heca Space  Kobject
  */
@@ -243,6 +204,7 @@ static struct kobj_type ktype_hspace = {
  */
 
 
+/* FIXME : maybe create a find_get as well for refcount ...*/
 struct heca_space *find_hspace(u32 id)
 {
         struct heca_module_state *heca_state = get_heca_module_state();
@@ -270,34 +232,6 @@ out:
         return hspace;
 }
 
-struct heca_space *find_get_hspace(u32 id)
-{
-        struct heca_module_state *heca_state = get_heca_module_state();
-        struct heca_space *hspace;
-        struct heca_space **hspacep;
-        struct radix_tree_root *root;
-
-        rcu_read_lock();
-        root = &heca_state->hspaces_tree_root;
-repeat:
-        hspace = NULL;
-        hspacep = (struct heca_space **) radix_tree_lookup_slot(root,
-                        (unsigned long) id);
-        if (hspacep) {
-                hspace = radix_tree_deref_slot((void **) hspacep);
-                if (unlikely(!hspace))
-                        goto out;
-                if (radix_tree_exception(hspace)) {
-                        if (radix_tree_deref_retry(hspace))
-                                goto repeat;
-                }
-                if(!hspace_get_unless_zero(hspace))
-                        goto repeat;
-        }
-out:
-        rcu_read_unlock();
-        return hspace;
-}
 
 static inline int create_hspace(__u32 hspace_id)
 {
@@ -312,7 +246,6 @@ static inline int create_hspace(__u32 hspace_id)
                 return -ENOMEM;
         }
         new_hspace->hspace_id = hspace_id;
-        kref_init(&new_hspace->kref);
         mutex_init(&new_hspace->hspace_mutex);
         spin_lock_init(&new_hspace->radix_lock);
         INIT_RADIX_TREE(&new_hspace->hprocs_tree_root,
@@ -341,11 +274,8 @@ failed:
         kfree(new_hspace);
         return r;
 kset_fail:
-        deregister_hspace(new_hspace);
-        hspace_put(new_hspace);
-        return r;
+        kobject_del(&new_hspace->kobj);
 kobj_fail:
-        deregister_hspace(new_hspace);
         kobject_put(&new_hspace->kobj);
         return r;
 

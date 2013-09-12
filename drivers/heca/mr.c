@@ -176,7 +176,6 @@ static struct kobj_type ktype_hmr = {
  * count_
  */
 
-
 struct heca_memory_region *find_heca_mr(struct heca_process *hproc,
                 u32 id)
 {
@@ -299,21 +298,21 @@ int create_heca_mr(struct hecaioc_hmr *udata)
         struct heca_memory_region *mr = NULL;
         struct heca_process *local_hproc = NULL;
 
-        hspace = find_get_hspace(udata->hspace_id);
+        hspace = find_hspace(udata->hspace_id);
         if (!hspace) {
                 heca_printk(KERN_ERR "can't find hspace %d", udata->hspace_id);
                 ret = -EFAULT;
                 goto out;
         }
-        /*FIXME: this assume only asingle local HPROC so far.. */
+
         local_hproc = find_local_hproc_from_list(hspace);
-        hspace_put(hspace);
         if (!local_hproc) {
                 heca_printk(KERN_ERR "can't find local hproc for hspace %d",
                                 udata->hspace_id);
                 ret = -EFAULT;
                 goto out;
         }
+
         mr = kzalloc(sizeof(struct heca_memory_region), GFP_KERNEL);
         if (!mr) {
                 heca_printk(KERN_ERR "can't allocate memory for MR");

@@ -72,7 +72,7 @@ static int heca_close(struct inode *inode, struct file *file)
                         else{
                                 struct heca_process *hproc, *tmp_hproc;
                                 int local_left=0;
-                                struct heca_space *hspace = find_get_hspace(
+                                struct heca_space *hspace = find_hspace(
                                                 priv->hspace_id);
                                 if(!hspace)
                                         goto free_priv;

@@ -485,7 +485,7 @@ unlock:
                 lru_add_drain();
 
                 /*
-                 * Try to delay faulting pages that were prefetched or pushed to
+                 * Try to delay faulting pages that were prefetched or pushed to 
                  * us, to be processed async. This is both to speed up
                  * processing of the msg queue; and to avoid a deadlock when
                  * a write fault has preceded us, sent a claim request, locked
@@ -912,13 +912,11 @@ int heca_do_page_fault(struct mm_struct *mm, struct vm_area_struct *vma,
         if (swp_entry_to_heca_data(entry, &hsd) < 0)
                 return VM_FAULT_ERROR;
 
-        hspace = find_get_hspace(hsd.hprocs.hspace_id);
+        hspace = find_hspace(hsd.hprocs.hspace_id);
         if (unlikely(!hspace))
                 return VM_FAULT_ERROR;
 
         fault_hproc = find_local_hproc_in_hspace(hspace, mm);
-        hspace_id = hspace->hspace_id;
-        hspace_put(hspace);
         if (unlikely(!fault_hproc))
                 return VM_FAULT_ERROR;
 
@@ -932,6 +930,7 @@ int heca_do_page_fault(struct mm_struct *mm, struct vm_area_struct *vma,
                 read_fault = 1;
 
         /* these scalars are for tracing */
+        hspace_id = hspace->hspace_id;
         hproc_id = fault_hproc->hproc_id;
         mr_id = fault_mr->hmr_id;
         shared_addr = norm_addr - fault_mr->addr;
