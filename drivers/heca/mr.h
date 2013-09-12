@@ -36,5 +36,4 @@ struct heca_memory_region *search_heca_mr_by_addr(struct heca_process *,
 int create_heca_mr(struct hecaioc_hmr *udata);
 void teardown_heca_memory_region(struct heca_process *,
                 struct heca_memory_region *);
-
 #endif /* MR_H_ */

@@ -27,9 +27,14 @@ struct heca_space {
         struct kobject kobj;
         struct kset *hprocs_kset;
         struct rcu_head rcu;
+        struct kref kref;
 };
 
+struct heca_space * __must_check hspace_get_unless_zero(struct heca_space *);
+void hspace_get(struct heca_space *);
+int hspace_put(struct heca_space *);
 struct heca_space *find_hspace(u32);
+struct heca_space *find_get_hspace(u32);
 int instantiate_hspace(struct hecaioc_hspace *);
 void teardown_hspace(struct heca_space *);
 int teardown_hspace_by_id(__u32 );

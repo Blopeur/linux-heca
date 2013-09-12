@@ -319,7 +319,7 @@ static inline void release_local_hproc(struct heca_process *hproc)
         struct heca_module_state *heca_state = get_heca_module_state();
         struct rb_root *root;
         struct rb_node *node;
-       /*FIXME : do we need to protect the scan ?*/
+        /*FIXME : do we need to protect the scan ?*/
         if (heca_state->htm) {
                 root = &heca_state->htm->connections_rb_tree_root;
                 for (node = rb_first(root);
@@ -470,7 +470,7 @@ int create_hproc(struct hecaioc_hproc *hproc_info)
                 heca_printk(KERN_ERR "failed kzalloc");
                 return -ENOMEM;
         }
-        hspace = find_hspace(hproc_info->hspace_id);
+        hspace = find_get_hspace(hproc_info->hspace_id);
         if (!hspace){
                 kfree(new_hproc);
                 return -EINVAL;
@@ -559,6 +559,7 @@ hproc_exist:
 connect_fail:
 no_mm:
         mutex_unlock(&hspace->hspace_mutex);
+        hspace_put(hspace);
         kfree(new_hproc);
         new_hproc = NULL;
         return r;
@@ -568,7 +569,7 @@ reg_fail:
                 release_connection_remote_hproc(hspace, new_hproc);
                 remove_hproc_from_descriptors(new_hproc);
         }
-
+        hspace_put(hspace);
         kfree(new_hproc);
         new_hproc = NULL;
         return r;
@@ -583,6 +584,7 @@ kobj_err:
                 release_connection_remote_hproc(hspace, new_hproc);
                 remove_hproc_from_descriptors(new_hproc);
         }
+        hspace_put(hspace);
         kobject_put(&new_hproc->kobj);
         return r;
 }
@@ -683,11 +685,12 @@ void teardown_hproc_by_id(u32 hspace_id, u32 hproc_id)
         struct heca_space *hspace;
         struct heca_process *hproc = NULL;
 
-        hspace = find_hspace(hspace_id);
+        hspace = find_get_hspace(hspace_id);
         if (!hspace) {
                 return;
         }
         hproc = find_hproc(hspace, hproc_id);
+        hspace_put(hspace);
         if (hproc) {
                 teardown_hproc(hspace, hproc);
         }
