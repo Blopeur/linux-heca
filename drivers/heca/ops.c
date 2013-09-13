@@ -19,6 +19,34 @@
 #include "base.h"
 #include "task.h"
 
+/* we inc  the refcount for all datastructure if we succeed */
+static inline struct heca_memory_region * find_get_hmr(u32 hspace_id,
+                u32 hproc_id, u32 hmr_id , struct heca_space **hspace,
+                struct heca_process **hproc)
+{
+        struct heca_memory_region *hmr = NULL;
+        *hspace = find_hspace(hspace_id);
+        if(!*hspace)
+                goto hspace_exit;
+
+        *hproc = find_hproc(*hspace, hproc_id);
+        if(!*hproc)
+                goto hproc_exit;
+
+        hmr = find_heca_mr(*hproc, hmr_id);
+        if(hmr)
+                return hmr;
+
+        hproc_put(*hproc);
+hproc_exit:
+        /* hspace_put(hspace);*/
+hspace_exit:
+        *hspace = NULL;
+        *hproc = NULL;
+        return hmr;
+}
+
+
 /*
  * send an rdma message. if a tx_e is available, prepare it according to the
  * arguments and send the message. otherwise, try and queue the request with
@@ -250,17 +278,10 @@ int process_request_query(struct heca_connection *conn,
         int r = -EFAULT;
         unsigned long addr;
 
-        hspace = find_hspace(msg->hspace_id);
-        if (unlikely(!hspace))
-                goto fail;
-
-        hproc = find_hproc(hspace, msg->dest_id);
-        if (unlikely(!hproc))
-                goto fail;
-
-        mr = find_heca_mr(hproc, msg->mr_id);
+        mr = find_get_hmr(msg->hspace_id, msg->dest_id, msg->mr_id, &hspace ,
+                        &hproc);
         if (unlikely(!mr))
-                goto out;
+                goto fail;
 
         addr = msg->req_addr + mr->addr;
 
@@ -269,7 +290,6 @@ int process_request_query(struct heca_connection *conn,
 
         r = heca_send_response(conn, MSG_RES_QUERY, msg);
 
-out:
         hproc_put(hproc);
 fail:
         return r;
@@ -285,17 +305,10 @@ int process_query_info(struct tx_buffer_element *tx_e)
         unsigned long addr;
         int r = -EFAULT;
 
-        hspace = find_hspace(msg->hspace_id);
-        if (!hspace)
-                goto fail;
-
-        hproc = find_hproc(hspace, msg->src_id);
-        if (!hproc)
-                goto fail;
-
-        mr = find_heca_mr(hproc, msg->mr_id);
+        mr = find_get_hmr(msg->hspace_id, msg->src_id, msg->mr_id, &hspace ,
+                        &hproc);
         if (!mr)
-                goto out;
+                goto fail;
 
         addr = msg->req_addr + mr->addr;
         hpc = heca_cache_get_hold(hproc, addr);
@@ -306,7 +319,6 @@ int process_query_info(struct tx_buffer_element *tx_e)
         }
         r = 0;
 
-out:
         hproc_put(hproc);
 fail:
         return r;
@@ -325,19 +337,16 @@ int process_pull_request(struct heca_connection *conn,
         BUG_ON(!rx_buf_e->hmsg_buffer);
         msg = rx_buf_e->hmsg_buffer;
 
-        hspace = find_hspace(msg->hspace_id);
-        if (unlikely(!hspace))
+        mr = find_get_hmr(msg->hspace_id, msg->src_id, msg->mr_id, &hspace ,
+                        &local_hproc);
+        if(!mr)
                 goto fail;
+        if (unlikely(!local_hproc->mm))
+                goto local_fail;
 
-        local_hproc = find_hproc(hspace, msg->src_id);
-        if (unlikely(!local_hproc || !local_hproc->mm))
-                goto fail;
-
-        /* push only happens to mr owners! */
-        mr = find_heca_mr(local_hproc, msg->mr_id);
-        if (unlikely(!mr || !(mr->flags & MR_LOCAL) ||
+        if (unlikely(!(mr->flags & MR_LOCAL) ||
                                 (mr->flags & MR_COPY_ON_ACCESS)))
-                goto fail;
+                goto mr_flag_fail;
 
         // we get -1 if something bad happened, or >0 if we had dpc or we requested the page
         if (heca_trigger_page_pull(hspace, local_hproc, mr, msg->req_addr) < 0)
@@ -346,6 +355,9 @@ int process_pull_request(struct heca_connection *conn,
 
         return r;
 
+mr_flag_fail:
+local_fail:
+        hproc_put(local_hproc);
 fail:
         return send_hproc_status_update(conn, msg);
 }
@@ -464,21 +476,14 @@ int process_page_claim(struct heca_connection *conn, struct heca_message *msg)
         unsigned long addr;
         int r = -EFAULT;
 
-        hspace = find_hspace(msg->hspace_id);
-        if (unlikely(!hspace))
-                goto out;
-
-        local_hproc = find_hproc(hspace, msg->dest_id);
-        if (unlikely(!local_hproc))
-                goto out;
-
-        mr = find_heca_mr(local_hproc, msg->mr_id);
+        mr = find_get_hmr(msg->hspace_id, msg->dest_id, msg->mr_id, &hspace ,
+                        &local_hproc);
         if (unlikely(!mr))
-                goto out_hproc;
+                goto out;
 
         remote_proc = find_hproc(hspace, msg->src_id);
         if (unlikely(!remote_proc))
-                goto out_hproc;
+                goto remote_err;
 
         addr = msg->req_addr + mr->addr;
 
@@ -501,7 +506,7 @@ int process_page_claim(struct heca_connection *conn, struct heca_message *msg)
         }
 
         hproc_put(remote_proc);
-out_hproc:
+remote_err:
         hproc_put(local_hproc);
 out:
         /*
@@ -521,15 +526,8 @@ static int heca_retry_claim(struct heca_message *msg, struct page *page)
         struct heca_process_list hprocs;
         struct heca_page_cache *hpc;
 
-        hspace = find_hspace(msg->hspace_id);
-        if (!hspace)
-                goto fail;
-
-        hproc = find_hproc(hspace, msg->src_id);
-        if (!hproc)
-                goto fail;
-
-        mr = find_heca_mr(hproc, msg->mr_id);
+        mr = find_get_hmr(msg->hspace_id, msg->src_id, msg->mr_id, &hspace,
+                        &hproc);
         if (!mr)
                 goto fail;
 
@@ -540,7 +538,7 @@ static int heca_retry_claim(struct heca_message *msg, struct page *page)
          * copy, or invalidating when it's trying to invalidate reader copies).
          */
         if (!heca_pte_present(hproc->mm, msg->req_addr + mr->addr))
-                goto fail;
+                goto pte_fail;
 
         rcu_read_lock();
         hprocs = heca_descriptor_to_hprocs(mr->descriptor);
@@ -552,8 +550,10 @@ static int heca_retry_claim(struct heca_message *msg, struct page *page)
          * don't have a valid directory, fall back to a regular fault (maybe hspace is
          * being removed?)
          */
-        if (unlikely(!owner || owner == hproc))
-                goto fail;
+        if (unlikely(!owner))
+                goto pte_fail;
+        if (unlikely(owner == hproc))
+                goto owner_fail;
 
         /*
          * this only happens when write-faulting on a page we are not
@@ -571,15 +571,19 @@ static int heca_retry_claim(struct heca_message *msg, struct page *page)
 
         remote_hproc = find_hproc(hspace, hpc->redirect_hproc_id);
         if (unlikely(!remote_hproc))
-                goto fail;
-
+                goto remote_fail;
+        /*FIXME: do we need to do a put remote_hproc after?? */
         heca_claim_page(hproc, remote_hproc, mr, msg->req_addr, page, 1);
         hproc_put(hproc);
         return 0;
 
+
+owner_fail:
+        hproc_put(hproc);
+remote_fail:
+pte_fail:
+        hproc_put(hproc);
 fail:
-        if (hproc)
-                hproc_put(hproc);
         return -EFAULT;
 }
 
@@ -697,7 +701,7 @@ no_page:
                         goto fail;
                 goto out;
 
-        /* defer and try to get the page again out of sequence */
+                /* defer and try to get the page again out of sequence */
         } else if (msg->type & (MSG_REQ_PAGE | MSG_REQ_READ)) {
                 trace_heca_defer_gup(local_hproc->hspace->hspace_id,
                                 local_hproc->hproc_id, remote_hproc->hproc_id,
@@ -766,27 +770,20 @@ int process_page_request_msg(struct heca_connection *conn,
         struct heca_space *hspace = NULL;
         struct heca_memory_region *mr = NULL;
 
-        hspace = find_hspace(msg->hspace_id);
-        if (unlikely(!hspace))
-                goto fail;
-
-        local_hproc = find_hproc(hspace, msg->src_id);
-        if (unlikely(!local_hproc))
-                goto fail;
-
-        mr = find_heca_mr(local_hproc, msg->mr_id);
+        mr = find_get_hmr(msg->hspace_id, msg->src_id, msg->mr_id, &hspace,
+                        &local_hproc);
         if (unlikely(!mr))
                 goto fail;
 
         remote_hproc = find_hproc(hspace, msg->dest_id);
         if (unlikely(!remote_hproc)) {
-                hproc_put(local_hproc);
-                goto fail;
+                goto remote_fail;
         }
 
         return process_page_request(conn, local_hproc, mr,
                         remote_hproc, msg, 0);
-
+remote_fail:
+        hproc_put(local_hproc);
 fail:
         return -EFAULT;
 }
